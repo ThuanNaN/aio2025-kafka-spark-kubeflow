@@ -122,4 +122,3 @@ Requirements:
 - Default index and topic: `heart-disease-stream`
 - Spark checkpoint path: `/app/spark/checkpoint` (mounted volume)
 - Parquet files are written with Snappy compression and partitioned by date/hour
-
