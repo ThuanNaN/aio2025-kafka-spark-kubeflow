@@ -1,0 +1,140 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+*.yaml
+MANIFEST
+*.md
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Kubeflow
+*.yaml.bak
+*.tar.gz
+pipeline_runs/
+experiments/
+
+# Airflow
+airflow.db
+airflow.cfg
+logs/
+*.log
+*.pid
+*.err
+*.out
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# MinIO / S3
+tmp/
+temp/
+*.tmp
+
+# Model files (optional - uncomment if models are large)
+# *.joblib
+# *.pkl
+# *.h5
+# *.pt
+# *.pth
+# *.onnx
+
+# Data files
+*.csv
+*.parquet
+*.json
+raw-data/
+data/
+
+# Checkpoints
+checkpoint/
+checkpoints/
+*.ckpt
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary Office files
+~$*.pptx
+~$*.xlsx
+~$*.docx
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Test coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# IDEs
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+kube_config.yaml
+
+# Secrets
+secrets/
+*.secret
+*.key
+*.pem
+*.crt
+
+# Terminals (Cursor)
+.cursor/
+terminals/
+
