@@ -1,0 +1,133 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    hostname: stream-project-zookeeper
+    container_name: stream-project-zookeeper
+    ports:
+      - "12181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - stream-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: stream-project-kafka
+    container_name: stream-project-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "19092:19092"
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'stream-project-zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://stream-project-kafka:9092,PLAINTEXT_HOST://localhost:19092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:19092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    networks:
+      - stream-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: stream-project-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "18080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: stream-project
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: stream-project-kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: stream-project-zookeeper:2181
+    networks:
+      - stream-network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: stream-project-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "19200:9200"
+      - "19300:9300"
+    networks:
+      - stream-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+
+  minio:
+    image: minio/minio:latest
+    container_name: stream-project-minio
+    ports:
+      - "19000:9000"      # API port
+      - "19001:9001"      # Console port
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    networks:
+      - stream-network
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  spark:
+    build:
+      context: .
+      dockerfile: spark/Dockerfile
+    container_name: stream-project-spark
+    depends_on:
+      - kafka
+      - elasticsearch
+      - minio
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=stream-project-kafka:9092
+      - KAFKA_TOPIC=heart-disease-stream
+      - ES_NODES=stream-project-elasticsearch
+      - ES_PORT=9200
+      - ES_INDEX=heart-disease-stream
+      - MINIO_ENDPOINT=http://stream-project-minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=ml-data
+    networks:
+      - stream-network
+    volumes:
+      - ./spark:/app/spark
+      - ./spark/checkpoint:/app/spark/checkpoint
+    command: tail -f /dev/null  # Keep container running
+
+networks:
+  stream-network:
+    driver: bridge
+
+volumes:
+  es-data:
+    driver: local
+  minio-data:
+    driver: local
