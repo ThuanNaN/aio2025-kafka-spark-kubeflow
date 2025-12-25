@@ -25,4 +25,4 @@ ENV PYTHONPATH=/app:$PYTHONPATH
 
 # Keep container running
 CMD ["tail", "-f", "/dev/null"]
-#docker exec stream-project-spark /bin/bash /app/spark/run_streaming.sh
+#docker exec stream-project-spark /bin/bash /app/spark/run_dual_sink.sh

@@ -15,7 +15,6 @@ class ElasticsearchTester:
         """Test ES connection"""
         print("=" * 70)
         print("ELASTICSEARCH CONNECTION TEST")
-        print("=" * 70)
         
         try:
             response = requests.get(self.base_url)
@@ -25,7 +24,6 @@ class ElasticsearchTester:
                 print(f"Version: {info['version']['number']}")
                 print(f"Cluster: {info['cluster_name']}")
                 return True
-            else:
                 print(f"\nFailed: {response.status_code}")
                 return False
         except Exception as e:

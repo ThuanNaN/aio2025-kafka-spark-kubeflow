@@ -23,18 +23,18 @@ class KafkaConfig:
         'api_version': (2, 8, 0),  # Compatible with Kafka 2.8+
     }
     
-    # Consumer settings
-    CONSUMER_CONFIG = {
-        'bootstrap_servers': BOOTSTRAP_SERVERS,
-        'auto_offset_reset': 'earliest',  # Start from beginning if no offset
-        'enable_auto_commit': True,
-        'group_id': 'heart-disease-consumer-group',
-        'value_deserializer': lambda v: v.decode('utf-8'),
-        'key_deserializer': lambda k: k.decode('utf-8') if k else None,
-        'api_version': (2, 8, 0),  # Compatible with Kafka 2.8+
-    }
+    # # Consumer settings
+    # CONSUMER_CONFIG = {
+    #     'bootstrap_servers': BOOTSTRAP_SERVERS,
+    #     'auto_offset_reset': 'earliest',  # Start from beginning if no offset
+    #     'enable_auto_commit': True,
+    #     'group_id': 'heart-disease-consumer-group',
+    #     'value_deserializer': lambda v: v.decode('utf-8'),
+    #     'key_deserializer': lambda k: k.decode('utf-8') if k else None,
+    #     'api_version': (2, 8, 0),  # Compatible with Kafka 2.8+
+    # }
     
-    # Connection timeout
-    CONNECTION_TIMEOUT_MS = 10000
-    REQUEST_TIMEOUT_MS = 30000
+    # # Connection timeout
+    # CONNECTION_TIMEOUT_MS = 10000
+    # REQUEST_TIMEOUT_MS = 30000
 

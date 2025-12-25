@@ -104,6 +104,7 @@ class DualSinkStreaming:
             .option("kafka.bootstrap.servers", self.kafka_bootstrap) \
             .option("subscribe", self.kafka_topic) \
             .option("startingOffsets", "latest") \
+            .option("failOnDataLoss", "false") \
             .load()
         
         print("Connected to Kafka successfully!")
@@ -192,9 +193,9 @@ class DualSinkStreaming:
                     .option("es.nodes.wan.only", "true") \
                     .mode("append") \
                     .save()
-                print(f"✅ Elasticsearch: {record_count} records written")
+                print(f"Elasticsearch: {record_count} records written")
             except Exception as e:
-                print(f"❌ Elasticsearch write failed: {e}")
+                print(f"Elasticsearch write failed: {e}")
             
             # ================================
             # SINK 2: MinIO (ML training data)
@@ -214,15 +215,15 @@ class DualSinkStreaming:
                     .option("compression", "snappy") \
                     .save(output_path)
                 
-                print(f"✅ MinIO: {record_count} records written")
+                print(f" MinIO: {record_count} records written")
                 print(f"   Path: {output_path}/date=.../hour=.../")
                 print(f"   Format: Parquet (Snappy compressed)")
             except Exception as e:
-                print(f"❌ MinIO write failed: {e}")
+                print(f" MinIO write failed: {e}")
                 import traceback
                 traceback.print_exc()
             
-            print(f"\n[Batch {batch_id}] ✅ Completed successfully!")
+            print(f"\n[Batch {batch_id}]  Completed successfully!")
             print("=" * 70)
         
         # Start streaming with foreachBatch
@@ -235,10 +236,10 @@ class DualSinkStreaming:
         print("\n" + "=" * 70)
         print("DUAL SINK STREAMING ACTIVE")
         print("=" * 70)
-        print(f"\n✅ Sink 1: Elasticsearch")
+        print(f"\n Sink 1: Elasticsearch")
         print(f"   └─ Index: {self.es_index}")
         print(f"   └─ Endpoint: http://localhost:19200/{self.es_index}")
-        print(f"\n✅ Sink 2: MinIO (Parquet)")
+        print(f"\nSink 2: MinIO (Parquet)")
         print(f"   └─ Bucket: {self.minio_bucket}")
         print(f"   └─ Path: s3a://{self.minio_bucket}/raw/heart-disease/")
         print(f"   └─ Console: http://localhost:19001")
