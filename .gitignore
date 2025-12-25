@@ -23,7 +23,6 @@ share/python-wheels/
 *.egg
 *.yaml
 MANIFEST
-*.md
 # Virtual Environment
 venv/
 ENV/
