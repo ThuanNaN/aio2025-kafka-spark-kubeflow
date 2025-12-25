@@ -1,34 +1,93 @@
 """
 Deploy Heart Disease Model to KServe
-Can be used as:
-1. Pipeline component (integrated into pipeline)
-2. Standalone script (deploy existing model from MinIO)
+Standalone script to deploy existing model from MinIO to KServe
 """
 
-from kfp import dsl, compiler
-from kfp.dsl import Artifact, Input, Output
-from typing import NamedTuple
+from kubernetes import client, config
+import boto3
 
 
-# ============================================================================
-# HELPER: Create MinIO Secret
-# ============================================================================
-def create_minio_secret(
-    namespace: str,
+def deploy_standalone(
+    model_uri: str = None,
+    service_name: str = "heart-disease-predictor",
+    namespace: str = "kubeflow-user-example-com",
     minio_endpoint: str = "192.168.2.4:19000",
-    access_key: str = "minioadmin",
-    secret_key: str = "minioadmin"
+    minio_access_key: str = "minioadmin",
+    minio_secret_key: str = "minioadmin",
+    bucket_name: str = "ml-data"
 ):
     """
-    Create MinIO credentials secret for KServe storage-initializer
+    Deploy model to KServe
+    
+    Args:
+        model_uri: Model path in S3. If None, automatically find latest model
+        service_name: Name of InferenceService
+        namespace: Kubernetes namespace
+        minio_endpoint: MinIO endpoint
+        minio_access_key: MinIO access key
+        minio_secret_key: MinIO secret key
+        bucket_name: MinIO bucket name
     """
-    from kubernetes import client
-    import base64
+    print("=" * 70)
+    print("KSERVE DEPLOYMENT")
+    print("=" * 70)
     
-    print(f"\n[1] Creating MinIO credentials secret...")
+    # Load Kubernetes config
+    try:
+        config.load_incluster_config()
+    except:
+        config.load_kube_config()
     
+    # Find latest model if not specified
+    if model_uri is None:
+        print("\n[Finding latest model in MinIO]")
+        minio_endpoint_url = f"http://{minio_endpoint}" if not minio_endpoint.startswith("http") else minio_endpoint
+        
+        s3_client = boto3.client(
+            's3',
+            endpoint_url=minio_endpoint_url,
+            aws_access_key_id=minio_access_key,
+            aws_secret_access_key=minio_secret_key,
+            verify=False
+        )
+        
+        try:
+            response = s3_client.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix="models/heart-disease/"
+            )
+            
+            if 'Contents' not in response:
+                print("[ERROR] No models found!")
+                return
+            
+            model_paths = [obj['Key'] for obj in response['Contents'] if obj['Key'].endswith('/model.joblib')]
+            
+            if not model_paths:
+                print("[ERROR] No model.joblib files found!")
+                return
+            
+            # Sort by modified time (newest first)
+            model_paths_with_time = []
+            for path in model_paths:
+                obj_info = s3_client.head_object(Bucket=bucket_name, Key=path)
+                model_paths_with_time.append({
+                    'path': path,
+                    'modified': obj_info['LastModified']
+                })
+            
+            model_paths_with_time.sort(key=lambda x: x['modified'], reverse=True)
+            latest_model = model_paths_with_time[0]
+            model_uri = f"s3://{bucket_name}/{latest_model['path']}"
+            print(f"[OK] Found latest model: {model_uri}")
+            
+        except Exception as e:
+            print(f"[ERROR] Error finding model: {e}")
+            return
+    
+    # Create MinIO secret
+    print("\n[1] Creating MinIO secret...")
     secret_name = "minio-s3-secret"
-    
     secret = {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -44,38 +103,24 @@ def create_minio_secret(
         },
         "type": "Opaque",
         "stringData": {
-            "AWS_ACCESS_KEY_ID": access_key,
-            "AWS_SECRET_ACCESS_KEY": secret_key
+            "AWS_ACCESS_KEY_ID": minio_access_key,
+            "AWS_SECRET_ACCESS_KEY": minio_secret_key
         }
     }
     
     v1 = client.CoreV1Api()
-    
     try:
         v1.create_namespaced_secret(namespace=namespace, body=secret)
-        print(f"    [OK] Secret '{secret_name}' created")
+        print(f"[OK] Secret '{secret_name}' created")
     except client.exceptions.ApiException as e:
         if e.status == 409:
-            print(f"    [OK] Secret '{secret_name}' already exists")
+            print(f"[OK] Secret '{secret_name}' already exists")
         else:
             raise
     
-    return secret_name
-
-
-# ============================================================================
-# HELPER: Create ServiceAccount
-# ============================================================================
-def create_service_account(namespace: str, secret_name: str):
-    """
-    Create ServiceAccount with MinIO secret attached
-    """
-    from kubernetes import client
-    
-    print(f"\n[2] Creating ServiceAccount...")
-    
+    # Create ServiceAccount
+    print("\n[2] Creating ServiceAccount...")
     sa_name = "kserve-sa"
-    
     service_account = {
         "apiVersion": "v1",
         "kind": "ServiceAccount",
@@ -83,70 +128,20 @@ def create_service_account(namespace: str, secret_name: str):
             "name": sa_name,
             "namespace": namespace
         },
-        "secrets": [
-            {"name": secret_name}
-        ]
+        "secrets": [{"name": secret_name}]
     }
-    
-    v1 = client.CoreV1Api()
     
     try:
         v1.create_namespaced_service_account(namespace=namespace, body=service_account)
-        print(f"    [OK] ServiceAccount '{sa_name}' created")
+        print(f"[OK] ServiceAccount '{sa_name}' created")
     except client.exceptions.ApiException as e:
         if e.status == 409:
-            print(f"    [OK] ServiceAccount '{sa_name}' already exists")
+            print(f"[OK] ServiceAccount '{sa_name}' already exists")
         else:
             raise
     
-    return sa_name
-
-
-# ============================================================================
-# STANDALONE DEPLOYMENT SCRIPT
-# ============================================================================
-def deploy_standalone(
-    model_uri: str = "s3://ml-data/models/heart-disease/latest/model.joblib",
-    model_version: str = "latest",
-    service_name: str = "heart-disease-predictor",
-    namespace: str = "kubeflow-user-example-com",
-    minio_endpoint: str = "192.168.2.4:19000",
-    minio_access_key: str = "minioadmin",
-    minio_secret_key: str = "minioadmin"
-):
-    """
-    Standalone function to deploy model directly (not in pipeline)
-    
-    Usage:
-        python demo_kserve.py deploy
-    """
-    from kubernetes import client, config
-    import yaml
-    
-    print("=" * 70)
-    print("STANDALONE KSERVE DEPLOYMENT")
-    print("=" * 70)
-    
-    # Load config
-    try:
-        config.load_incluster_config()
-    except:
-        config.load_kube_config()
-    
-    # Step 1: Create MinIO secret
-    secret_name = create_minio_secret(
-        namespace=namespace,
-        minio_endpoint=minio_endpoint,
-        access_key=minio_access_key,
-        secret_key=minio_secret_key
-    )
-    
-    # Step 2: Create ServiceAccount
-    sa_name = create_service_account(namespace=namespace, secret_name=secret_name)
-    
-    # Step 3: Create InferenceService
-    print(f"\n[3] Creating InferenceService...")
-    
+    # Create InferenceService
+    print("\n[3] Creating InferenceService...")
     inference_service = {
         "apiVersion": "serving.kserve.io/v1beta1",
         "kind": "InferenceService",
@@ -156,8 +151,9 @@ def deploy_standalone(
         },
         "spec": {
             "predictor": {
-                "serviceAccountName": sa_name,  # USE THE SERVICE ACCOUNT
-                "sklearn": {
+                "serviceAccountName": sa_name,
+                "model": {
+                    "modelFormat": {"name": "sklearn"},
                     "storageUri": model_uri,
                     "resources": {
                         "requests": {"cpu": "100m", "memory": "256Mi"},
@@ -168,15 +164,8 @@ def deploy_standalone(
         }
     }
     
-    print(f"    Model URI: {model_uri}")
-    print(f"    Service: {service_name}")
-    print(f"    Namespace: {namespace}")
-    print(f"    ServiceAccount: {sa_name}")
-    
     api = client.CustomObjectsApi()
-    
     try:
-        # Try to create
         api.create_namespaced_custom_object(
             group="serving.kserve.io",
             version="v1beta1",
@@ -184,11 +173,10 @@ def deploy_standalone(
             plural="inferenceservices",
             body=inference_service
         )
-        print(f"    [OK] InferenceService created!")
-        
+        print(f"[OK] InferenceService '{service_name}' created")
     except client.exceptions.ApiException as e:
-        if e.status == 409:  # Already exists
-            print(f"    [WARN] InferenceService already exists - updating...")
+        if e.status == 409:
+            print(f"[WARN] InferenceService already exists - updating...")
             api.patch_namespaced_custom_object(
                 group="serving.kserve.io",
                 version="v1beta1",
@@ -197,100 +185,22 @@ def deploy_standalone(
                 name=service_name,
                 body=inference_service
             )
-            print(f"    [OK] InferenceService updated!")
+            print(f"[OK] InferenceService updated")
         else:
             raise
     
     print("\n" + "=" * 70)
     print("[OK] DEPLOYMENT COMPLETE!")
     print("=" * 70)
-    
-    print(f"\n[CHECK STATUS]")
+    print(f"\nCheck status:")
     print(f"  kubectl get inferenceservice {service_name} -n {namespace}")
-    print(f"  kubectl describe inferenceservice {service_name} -n {namespace}")
-    
-    print(f"\n[GET LOGS]")
-    print(f"  kubectl logs -n {namespace} -l serving.kserve.io/inferenceservice={service_name} --all-containers --tail=50")
-    
-    print(f"\n[GET URL]")
-    print(f"  kubectl get inferenceservice {service_name} -n {namespace} -o jsonpath='{{.status.url}}'")
-    
-    print(f"\n[TEST PREDICTION]")
-    print(f"""  # Get URL
-  URL=$(kubectl get inferenceservice {service_name} -n {namespace} -o jsonpath='{{.status.url}}')
-  
-  # Send prediction request
-  curl -X POST $URL/v1/models/{service_name}:predict \\
-    -H 'Content-Type: application/json' \\
-    -d '{{
-      "instances": [
-        [0.5, -0.2, 1.1, 0.3, -0.7, 0.9, -0.4, 1.2, 0.6, -0.5, 
-         0.8, -0.3, 0.4, 0.7, 0.2, 0.1]
-      ]
-    }}'
-    """)
-    
-    print("\n" + "=" * 70)
-
-
-# ============================================================================
-# HELPER: Create inference request
-# ============================================================================
-def create_sample_inference_request():
-    """
-    Create a sample prediction request for the heart disease model
-    """
-    import json
-    
-    # Sample feature values (standardized)
-    # These correspond to: age, sex, cp, trestbps, chol, fbs, restecg, 
-    # thalach, exang, oldpeak, slope, ca, thal, age_x_thalach, bmi_proxy
-    sample_features = [
-        0.5,   # age (standardized)
-        1.0,   # sex
-        2.0,   # cp
-        0.3,   # trestbps
-        -0.5,  # chol
-        0.0,   # fbs
-        1.0,   # restecg
-        -0.8,  # thalach
-        1.0,   # exang
-        1.2,   # oldpeak
-        1.0,   # slope
-        0.0,   # ca
-        2.0,   # thal
-        -0.4,  # age_x_thalach (derived)
-        0.2    # bmi_proxy (derived)
-    ]
-    
-    request = {
-        "instances": [sample_features]
-    }
-    
-    print("Sample Prediction Request:")
-    print(json.dumps(request, indent=2))
-    
-    return request
 
 
 if __name__ == "__main__":
     import sys
     
-    print("=" * 70)
-    print("KSERVE DEPLOYMENT HELPER")
-    print("=" * 70)
-    
     if len(sys.argv) > 1 and sys.argv[1] == "deploy":
-        # Deploy standalone
         deploy_standalone()
-    
-    elif len(sys.argv) > 1 and sys.argv[1] == "sample":
-        # Create sample request
-        create_sample_inference_request()
-    
     else:
-        print("\nUsage:")
-        print("  python demo_kserve.py deploy       # Deploy model to KServe")
-        print("  python demo_kserve.py sample       # Show sample prediction request")
-        print("\nOr import as KFP component:")
-        print("  from demo_kserve import deploy_model_to_kserve")
+        print("Usage:")
+        print("  python demo_kserve.py deploy         # Deploy model to KServe (auto-find latest model)")

@@ -1,17 +1,10 @@
-"""
-Kubeflow Pipeline: Heart Disease with Katib (DEBUG VERSION)
-- Shorter timeout for faster debugging
-- Better logging
-- Simpler training function
-"""
-
 from kfp import dsl, compiler
 from kfp.dsl import Artifact, Input, Output
 from typing import NamedTuple
 
 
 # ============================================================================
-# COMPONENT 1: MERGED Data Preparation
+# COMPONENT 1: Data Preparation
 # ============================================================================
 @dsl.component(
     base_image="python:3.9",
@@ -25,7 +18,7 @@ def prepare_data(
     data_prefix: str,
     output_data: Output[Artifact]
 ) -> NamedTuple('Outputs', [('num_records', int), ('num_features', int)]):
-    """MERGED: Collect + Preprocess + Feature Engineering"""
+    """Collect + Preprocess + Feature Engineering"""
     import boto3
     import pandas as pd
     import numpy as np
@@ -51,10 +44,13 @@ def prepare_data(
     parquet_files = [obj['Key'] for obj in response.get('Contents', []) 
                     if obj['Key'].endswith('.parquet')]
     
+    print(f"Found {len(parquet_files)} parquet files")
+    
     dfs = []
     for file_key in parquet_files[:10]:
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.parquet')
         tmp_file_path = tmp_file.name
+        print(f"Downloading file: {file_key} to {tmp_file_path}")
         tmp_file.close()
         s3_client.download_file(bucket_name, file_key, tmp_file_path)
         dfs.append(pd.read_parquet(tmp_file_path))
@@ -64,6 +60,7 @@ def prepare_data(
         raise Exception("No data found in MinIO!")
     
     combined_df = pd.concat(dfs, ignore_index=True)
+    print(f"Combined data: {combined_df.shape}")
     
     # Preprocess
     feature_cols = ['age', 'sex', 'cp', 'trestbps', 'chol', 'fbs', 
@@ -73,6 +70,7 @@ def prepare_data(
     df_clean = df_clean.fillna(df_clean.median())
     df_clean = df_clean.drop_duplicates()
     
+    # Remove outliers
     for col in ['age', 'trestbps', 'chol', 'thalach', 'oldpeak']:
         Q1, Q3 = df_clean[col].quantile([0.25, 0.75])
         IQR = Q3 - Q1
@@ -85,6 +83,7 @@ def prepare_data(
     target = df_clean['target']
     features = df_clean.drop('target', axis=1)
     
+    # Standardization
     scaler = StandardScaler()
     features_scaled = scaler.fit_transform(features)
     features_df = pd.DataFrame(features_scaled, columns=features.columns)
@@ -93,7 +92,8 @@ def prepare_data(
     df_final['target'] = target.values
     
     df_final.to_csv(output_data.path, index=False)
-    print(f"✅ Complete! {len(df_final)} records, {len(features.columns)} features")
+    
+    print(f"[OK] Complete! {len(df_final)} records, {len(features.columns)} features")
     
     Outputs = namedtuple('Outputs', ['num_records', 'num_features'])
     return Outputs(len(df_final), len(features.columns))
@@ -115,7 +115,9 @@ def validate_data(
     import pandas as pd
     import json
     
+    print("=" * 70)
     print("COMPONENT 2: DATA VALIDATION")
+    print("=" * 70)
     
     df = pd.read_csv(input_data.path)
     
@@ -135,294 +137,134 @@ def validate_data(
         'is_valid': bool(is_valid)
     }, indent=2)
     
-    print(f"Result: {'✅ VALID' if is_valid else '❌ INVALID'}")
+    print(f"Total records: {len(df)}")
+    print(f"Total features: {len(df.columns) - 1}")
+    print(f"Result: {'[OK] VALID' if is_valid else '[ERROR] INVALID'}")
     
     if not is_valid:
-        raise Exception(f"Validation failed!")
+        raise Exception(f"Validation failed: {validation_report}")
     
     return validation_report
 
 
 # ============================================================================
-# COMPONENT 3: Katib HPO (DEBUG VERSION with detailed logging)
+# COMPONENT 3: Train and Evaluate Model
 # ============================================================================
 @dsl.component(
     base_image="python:3.9",
-    packages_to_install=["kubeflow-katib==0.17.0", "pandas", "scikit-learn"]
+    packages_to_install=["pandas", "scikit-learn", "joblib", "numpy"]
 )
-def katib_hyperparameter_tuning_debug(
+def train_model(
     input_data: Input[Artifact],
-    katib_namespace: str = "kubeflow-user-example-com",
-    max_trials: int = 3,  # Reduced for faster debugging
-    parallel_trials: int = 1  # Run sequentially for easier debugging
-) -> NamedTuple('Outputs', [('best_n_estimators', int), ('best_max_depth', int), ('best_accuracy', float)]):
+    model_output: Output[Artifact],
+    n_estimators: int = 100,
+    max_depth: int = 10,
+    min_samples_split: int = 5,
+    min_samples_leaf: int = 2
+) -> NamedTuple('Outputs', [
+    ('train_accuracy', float), 
+    ('test_accuracy', float),
+    ('eval_accuracy', float),
+    ('eval_f1_score', float)
+]):
     """
-    Katib HPO with DEBUG mode - reduced trials and better logging
+    Train and Evaluate Random Forest model with FIXED hyperparameters
     """
-    from kubeflow import katib
     import pandas as pd
+    from sklearn.model_selection import train_test_split
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import accuracy_score, f1_score
+    import joblib
     from collections import namedtuple
     import time
     
     print("=" * 70)
-    print("COMPONENT 3: KATIB HPO (DEBUG MODE)")
+    print("COMPONENT 3: TRAINING AND EVALUATION")
     print("=" * 70)
     
-    data_path = input_data.path
-    print(f"\n[DEBUG] Data artifact path: {data_path}")
-    
-    # Define SIMPLE training function for debugging
-    def train_heart_disease_simple(parameters):
-        """
-        SIMPLIFIED training function for debugging
-        Just prints parameters and returns a simulated accuracy
-        """
-        import sys
-        
-        print("="*50)
-        print("KATIB TRIAL STARTED")
-        print("="*50)
-        
-        # Get hyperparameters
-        n_estimators = int(parameters["n_estimators"])
-        max_depth = int(parameters["max_depth"])
-        
-        print(f"Hyperparameters received:")
-        print(f"  n_estimators = {n_estimators}")
-        print(f"  max_depth = {max_depth}")
-        
-        # Simulate training (no actual data needed for debugging)
-        print("\nSimulating training...")
-        
-        # Calculate simulated accuracy based on hyperparameters
-        # Better params = higher accuracy
-        base_acc = 0.75
-        n_est_bonus = (n_estimators - 50) / 1500  # Max +0.10
-        depth_bonus = (max_depth - 5) / 150       # Max +0.10
-        
-        accuracy = base_acc + n_est_bonus + depth_bonus
-        accuracy = min(accuracy, 0.95)
-        
-        print(f"\nSimulated training complete!")
-        print(f"Simulated accuracy: {accuracy:.4f}")
-        
-        # CRITICAL: Print metric in exact format Katib expects
-        print(f"\naccuracy={accuracy:.4f}")
-        
-        print("="*50)
-        print("KATIB TRIAL FINISHED")
-        print("="*50)
-        
-        sys.stdout.flush()  # Force flush output
-        
-        return accuracy
-    
-    # Define search space
-    print("\n[DEBUG] Defining search space...")
-    parameters = {
-        "n_estimators": katib.search.int(min=50, max=100, step=10),  # Smaller range
-        "max_depth": katib.search.int(min=5, max=10, step=1),        # Smaller range
-    }
-    
-    print("[DEBUG] Search space:")
-    print("  - n_estimators: [50, 100] step 10")
-    print("  - max_depth: [5, 10] step 1")
-    
-    # Initialize Katib client
-    client = katib.KatibClient(namespace=katib_namespace)
-    
-    experiment_name = f"heart-hpo-debug-{int(time.time())}"
-    
-    print(f"\n[DEBUG] Submitting experiment: {experiment_name}")
-    print(f"[DEBUG] Max trials: {max_trials}")
-    print(f"[DEBUG] Parallel trials: {parallel_trials}")
-    
-    try:
-        # Submit experiment
-        client.tune(
-            name=experiment_name,
-            objective=train_heart_disease_simple,
-            parameters=parameters,
-            objective_metric_name="accuracy",
-            objective_type="maximize",
-            max_trial_count=max_trials,
-            parallel_trial_count=parallel_trials,
-            resources_per_trial={
-                "cpu": "100m",      # Very low resources for debugging
-                "memory": "256Mi"
-            }
-        )
-        
-        print(f"\n[DEBUG] Experiment submitted!")
-        print(f"[DEBUG] Check experiment status:")
-        print(f"  kubectl get experiment {experiment_name} -n {katib_namespace}")
-        print(f"[DEBUG] Check trials:")
-        print(f"  kubectl get trials -n {katib_namespace} -l experiment={experiment_name}")
-        
-        # Wait with shorter timeout
-        print(f"\n[DEBUG] Waiting for completion (timeout: 3 minutes)...")
-        
-        client.wait_for_experiment_condition(
-            name=experiment_name,
-            namespace=katib_namespace,
-            timeout=180  # 3 minutes only
-        )
-        
-        print(f"\n[DEBUG] Experiment completed!")
-        
-        # Get best hyperparameters
-        best_params = client.get_optimal_hyperparameters(experiment_name)
-        
-        print(f"\n[DEBUG] Best hyperparameters: {best_params}")
-        
-        best_n_est = 100  # Default
-        best_depth = 10   # Default
-        best_acc = 0.85   # Default
-        
-        if best_params:
-            # Extract from parameter_assignments
-            if 'parameter_assignments' in best_params and best_params['parameter_assignments']:
-                for param in best_params['parameter_assignments']:
-                    if param['name'] == "n_estimators":
-                        best_n_est = int(param['value'])
-                    elif param['name'] == "max_depth":
-                        best_depth = int(param['value'])
-            
-            # Extract accuracy from observation metrics
-            if 'observation' in best_params and best_params['observation']:
-                if 'metrics' in best_params['observation'] and best_params['observation']['metrics']:
-                    for metric in best_params['observation']['metrics']:
-                        if metric['name'] == "accuracy":
-                            best_acc = float(metric['latest'])
-        
-        print(f"\n✅ Katib Results:")
-        print(f"  Best n_estimators: {best_n_est}")
-        print(f"  Best max_depth: {best_depth}")
-        print(f"  Best accuracy: {best_acc:.4f}")
-        
-    except Exception as e:
-        print(f"\n❌ Katib experiment failed!")
-        print(f"Error: {e}")
-        print(f"\nDEBUG COMMANDS:")
-        print(f"  kubectl get experiment {experiment_name} -n {katib_namespace} -o yaml")
-        print(f"  kubectl get trials -n {katib_namespace} -l experiment={experiment_name}")
-        print(f"  kubectl logs -n {katib_namespace} <trial-name> --all-containers")
-        print(f"\nUsing fallback hyperparameters...")
-        
-        best_n_est = 100
-        best_depth = 10
-        best_acc = 0.80
-    
-    Outputs = namedtuple('Outputs', ['best_n_estimators', 'best_max_depth', 'best_accuracy'])
-    return Outputs(best_n_est, best_depth, best_acc)
-
-
-# ============================================================================
-# COMPONENT 4: Model Training
-# ============================================================================
-@dsl.component(
-    base_image="python:3.9",
-    packages_to_install=["pandas", "scikit-learn", "joblib"]
-)
-def train_model(
-    input_data: Input[Artifact],
-    best_n_estimators: int,
-    best_max_depth: int,
-    model_output: Output[Artifact]
-) -> NamedTuple('Outputs', [('train_accuracy', float), ('test_accuracy', float)]):
-    """Train model"""
-    import pandas as pd
-    from sklearn.model_selection import train_test_split
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.metrics import accuracy_score
-    import joblib
-    from collections import namedtuple
-    
-    print("COMPONENT 4: MODEL TRAINING")
-    
+    # Load data
     df = pd.read_csv(input_data.path)
     X = df.drop('target', axis=1)
     y = df['target']
     
+    print(f"Dataset: {X.shape[0]} samples, {X.shape[1]} features")
+    print(f"Target distribution: {y.value_counts().to_dict()}")
+    
+    # Split data
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
     
+    print(f"\nTrain set: {X_train.shape[0]} samples")
+    print(f"Test set: {X_test.shape[0]} samples")
+    
+    # Hyperparameters
+    print(f"\nHyperparameters:")
+    print(f"  n_estimators: {n_estimators}")
+    print(f"  max_depth: {max_depth}")
+    print(f"  min_samples_split: {min_samples_split}")
+    print(f"  min_samples_leaf: {min_samples_leaf}")
+    
+    # Initialize model
     model = RandomForestClassifier(
-        n_estimators=best_n_estimators,
-        max_depth=best_max_depth,
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf,
         random_state=42,
-        n_jobs=-1
+        n_jobs=-1,
+        verbose=1
     )
+    
+    # Train
+    print("\nTraining model...")
+    start_time = time.time()
     
     model.fit(X_train, y_train)
     
-    train_acc = accuracy_score(y_train, model.predict(X_train))
-    test_acc = accuracy_score(y_test, model.predict(X_test))
+    elapsed_time = time.time() - start_time
+    print(f"[OK] Training completed in {elapsed_time:.2f} seconds")
     
-    print(f"Train Accuracy: {train_acc:.4f}")
-    print(f"Test Accuracy: {test_acc:.4f}")
+    # Predictions
+    train_pred = model.predict(X_train)
+    test_pred = model.predict(X_test)
     
+    # Training metrics
+    train_acc = accuracy_score(y_train, train_pred)
+    test_acc = accuracy_score(y_test, test_pred)
+    
+    # Evaluation metrics (on test set)
+    eval_acc = accuracy_score(y_test, test_pred)
+    eval_f1 = f1_score(y_test, test_pred, average='weighted', zero_division=0)
+    
+    print(f"\nTraining Results:")
+    print(f"  Train Accuracy: {train_acc:.4f}")
+    print(f"  Test Accuracy: {test_acc:.4f}")
+    
+    print(f"\nEvaluation Results:")
+    print(f"  Accuracy:  {eval_acc:.4f}")
+    print(f"  F1-Score:  {eval_f1:.4f}")
+    
+    # Feature importance
+    feature_importance = pd.DataFrame({
+        'feature': X.columns,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    print(f"\nTop 5 Important Features:")
+    for idx, row in feature_importance.head(5).iterrows():
+        print(f"  {row['feature']}: {row['importance']:.4f}")
+    
+    # Save model
     joblib.dump(model, model_output.path)
+    print(f"\n[OK] Model saved to: {model_output.path}")
     
-    Outputs = namedtuple('Outputs', ['train_accuracy', 'test_accuracy'])
-    return Outputs(float(train_acc), float(test_acc))
+    Outputs = namedtuple('Outputs', ['train_accuracy', 'test_accuracy', 'eval_accuracy', 'eval_f1_score'])
+    return Outputs(float(train_acc), float(test_acc), float(eval_acc), float(eval_f1))
 
 
 # ============================================================================
-# COMPONENT 5: Model Evaluation
-# ============================================================================
-@dsl.component(
-    base_image="python:3.9",
-    packages_to_install=["pandas", "scikit-learn", "joblib"]
-)
-def evaluate_model(
-    input_data: Input[Artifact],
-    model: Input[Artifact],
-    evaluation_report: Output[Artifact]
-) -> NamedTuple('Outputs', [('accuracy', float), ('f1_score', float)]):
-    """Evaluate model"""
-    import pandas as pd
-    import joblib
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import accuracy_score, f1_score
-    import json
-    from collections import namedtuple
-    
-    print("COMPONENT 5: MODEL EVALUATION")
-    
-    clf = joblib.load(model.path)
-    df = pd.read_csv(input_data.path)
-    
-    X = df.drop('target', axis=1)
-    y = df['target']
-    
-    _, X_test, _, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    
-    y_pred = clf.predict(X_test)
-    
-    accuracy = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred, average='weighted')
-    
-    print(f"Accuracy: {accuracy:.4f}")
-    print(f"F1-Score: {f1:.4f}")
-    
-    report = {
-        'accuracy': float(accuracy),
-        'f1_score': float(f1)
-    }
-    
-    with open(evaluation_report.path, 'w') as f:
-        json.dump(report, f, indent=2)
-    
-    Outputs = namedtuple('Outputs', ['accuracy', 'f1_score'])
-    return Outputs(float(accuracy), float(f1))
-
-
-# ============================================================================
-# COMPONENT 6: Model Registry
+# COMPONENT 4: Register Model to MinIO
 # ============================================================================
 @dsl.component(
     base_image="python:3.9",
@@ -430,19 +272,25 @@ def evaluate_model(
 )
 def register_model(
     model: Input[Artifact],
-    accuracy: float,
-    f1_score: float,
+    train_accuracy: float,
+    test_accuracy: float,
+    eval_accuracy: float,
+    eval_f1_score: float,
     minio_endpoint: str,
     minio_access_key: str,
     minio_secret_key: str,
-    bucket_name: str
+    bucket_name: str,
+    n_estimators: int,
+    max_depth: int
 ) -> str:
-    """Register model to MinIO"""
+    """Register trained model to MinIO with metadata"""
     import boto3
     from datetime import datetime
     import json
     
-    print("COMPONENT 6: MODEL REGISTRY")
+    print("=" * 70)
+    print("COMPONENT 5: MODEL REGISTRY")
+    print("=" * 70)
     
     s3_client = boto3.client(
         's3',
@@ -452,29 +300,52 @@ def register_model(
         verify=False
     )
     
+    # Generate version
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_version = f"v_{timestamp}_acc_{accuracy:.4f}".replace(".", "_")
-    model_key = f"models/heart-disease/{model_version}/model.joblib"
+    model_version = f"v_{timestamp}_acc_{eval_accuracy:.4f}".replace(".", "_")
     
+    print(f"Model version: {model_version}")
+    
+    # Upload model
+    model_key = f"models/heart-disease/{model_version}/model.joblib"
     with open(model.path, 'rb') as f:
         s3_client.upload_fileobj(f, bucket_name, model_key)
+    print(f"[OK] Model uploaded: s3://{bucket_name}/{model_key}")
     
+    # Create metadata
     metadata = {
-        'version': model_version,
-        'accuracy': accuracy,
-        'f1_score': f1_score,
-        'timestamp': timestamp
+        'model_version': model_version,
+        'timestamp': timestamp,
+        'hyperparameters': {
+            'n_estimators': n_estimators,
+            'max_depth': max_depth
+        },
+        'metrics': {
+            'train_accuracy': float(train_accuracy),
+            'test_accuracy': float(test_accuracy),
+            'eval_accuracy': float(eval_accuracy),
+            'eval_f1_score': float(eval_f1_score)
+        },
+        'model_type': 'RandomForestClassifier',
+        'framework': 'scikit-learn',
+        'dataset': 'heart-disease'
     }
     
+    # Upload metadata
     metadata_key = f"models/heart-disease/{model_version}/metadata.json"
     s3_client.put_object(
         Bucket=bucket_name,
         Key=metadata_key,
-        Body=json.dumps(metadata).encode()
+        Body=json.dumps(metadata, indent=2).encode()
     )
+    print(f"[OK] Metadata uploaded: s3://{bucket_name}/{metadata_key}")
     
     model_uri = f"s3://{bucket_name}/{model_key}"
-    print(f"✅ Model registered: {model_uri}")
+    
+    print(f"\n[OK] Model registration complete!")
+    print(f"Model URI: {model_uri}")
+    print(f"Test Accuracy: {eval_accuracy:.4f}")
+    print(f"F1-Score: {eval_f1_score:.4f}")
     
     return model_uri
 
@@ -483,17 +354,26 @@ def register_model(
 # PIPELINE
 # ============================================================================
 @dsl.pipeline(
-    name="heart-disease-katib-debug",
-    description="DEBUG version with 3 trials and detailed logging"
+    name="heart-disease-simple-no-tuning",
+    description="Simple pipeline: Prepare -> Validate -> Train and Evaluate -> Register"
 )
 def heart_disease_pipeline(
+    # MinIO configs
     minio_endpoint: str = "http://192.168.2.4:19000",
     minio_access_key: str = "minioadmin",
     minio_secret_key: str = "minioadmin",
     bucket_name: str = "ml-data",
     data_prefix: str = "raw/heart-disease",
-    katib_namespace: str = "kubeflow-user-example-com"
+    
+    # Model hyperparameters (FIXED - no tuning)
+    n_estimators: int = 100,
+    max_depth: int = 10,
+    min_samples_split: int = 5,
+    min_samples_leaf: int = 2
 ):
+
+    
+    # ========== STEP 1: DATA PREPARATION ==========
     prepare_task = prepare_data(
         minio_endpoint=minio_endpoint,
         minio_access_key=minio_access_key,
@@ -501,46 +381,52 @@ def heart_disease_pipeline(
         bucket_name=bucket_name,
         data_prefix=data_prefix
     )
+    prepare_task.set_display_name('Data Preparation')
     
+    # ========== STEP 2: DATA VALIDATION ==========
     validate_task = validate_data(
         input_data=prepare_task.outputs['output_data']
     )
+    validate_task.set_display_name('Data Validation')
+    validate_task.after(prepare_task)
     
-    katib_task = katib_hyperparameter_tuning_debug(
-        input_data=prepare_task.outputs['output_data'],
-        katib_namespace=katib_namespace,
-        max_trials=3,
-        parallel_trials=1
-    )
-    katib_task.after(validate_task)
-    
+    # ========== STEP 3: TRAINING AND EVALUATION ==========
     train_task = train_model(
         input_data=prepare_task.outputs['output_data'],
-        best_n_estimators=katib_task.outputs['best_n_estimators'],
-        best_max_depth=katib_task.outputs['best_max_depth']
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf
     )
+    train_task.set_display_name('Training and Evaluation')
+    train_task.after(validate_task)
     
-    eval_task = evaluate_model(
-        input_data=prepare_task.outputs['output_data'],
-        model=train_task.outputs['model_output']
-    )
-    
+    # ========== STEP 4: MODEL REGISTRY ==========
     register_task = register_model(
         model=train_task.outputs['model_output'],
-        accuracy=eval_task.outputs['accuracy'],
-        f1_score=eval_task.outputs['f1_score'],
+        train_accuracy=train_task.outputs['train_accuracy'],
+        test_accuracy=train_task.outputs['test_accuracy'],
+        eval_accuracy=train_task.outputs['eval_accuracy'],
+        eval_f1_score=train_task.outputs['eval_f1_score'],
         minio_endpoint=minio_endpoint,
         minio_access_key=minio_access_key,
         minio_secret_key=minio_secret_key,
-        bucket_name=bucket_name
+        bucket_name=bucket_name,
+        n_estimators=n_estimators,
+        max_depth=max_depth
     )
+    register_task.set_display_name('Model Registry')
+    register_task.after(train_task)
 
 
+# ============================================================================
+# COMPILE PIPELINE
+# ============================================================================
 if __name__ == "__main__":
-    output_file = "heart_disease_pipeline_katib_debug.yaml"
+    output_file = "heart_disease_pipeline_simple.yaml"
     
     print("=" * 70)
-    print("COMPILING DEBUG PIPELINE")
+    print("COMPILING SIMPLE PIPELINE (NO HYPERPARAMETER TUNING)")
     print("=" * 70)
     
     compiler.Compiler().compile(
@@ -548,15 +434,22 @@ if __name__ == "__main__":
         package_path=output_file
     )
     
-    print(f"\n✅ Pipeline compiled: {output_file}")
-    print("\n🔧 DEBUG Configuration:")
-    print("  - Only 3 trials (faster)")
-    print("  - 1 parallel trial (sequential for easier debugging)")
-    print("  - 3 minute timeout")
-    print("  - Minimal resources (100m CPU, 256Mi RAM)")
-    print("  - Simple training function (no actual training)")
-    print("  - Detailed logging")
-    print("\n📝 After running, check:")
-    print("  kubectl get experiment -n kubeflow-user-example-com")
-    print("  kubectl get trials -n kubeflow-user-example-com")
+    print(f"\n[OK] Pipeline compiled successfully!")
+    print(f"Output file: {output_file}")
+    
+    print("\nPipeline Flow:")
+    print("  1. Data Preparation (MinIO -> CSV)")
+    print("  2. Data Validation")
+    print("  3. Training and Evaluation (RandomForest with FIXED hyperparameters)")
+    print("  4. Model Registry (save to MinIO)")
+    
+    print("\nDefault Hyperparameters:")
+    print("  - n_estimators: 100")
+    print("  - max_depth: 10")
+    print("  - min_samples_split: 5")
+    print("  - min_samples_leaf: 2")
+    
+    print("\nTo run with custom hyperparameters:")
+    print("  Upload to Kubeflow UI and modify parameters in the run")
+    
     print("=" * 70)

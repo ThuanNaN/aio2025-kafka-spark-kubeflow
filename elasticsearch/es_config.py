@@ -43,14 +43,3 @@ class ElasticsearchConfig:
             "target": {"type": "keyword"}
         }
     }
-    
-    # Spark-Elasticsearch connector options
-    SPARK_ES_OPTIONS = {
-        "es.nodes": ES_HOSTS[0],
-        "es.port": ES_PORT,
-        "es.resource": INDEX_NAME,
-        "es.nodes.wan.only": "true",
-        "es.index.auto.create": "true",
-        "es.mapping.date.rich": "false"
-    }
-
